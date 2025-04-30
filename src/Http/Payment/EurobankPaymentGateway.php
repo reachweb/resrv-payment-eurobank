@@ -75,7 +75,7 @@ class EurobankPaymentGateway implements PaymentInterface
         $request = request();
         Log::info('Payment callback received', $request->all());
 
-        $reservation = Reservation::findByPaymentId($request->orderid)->first();
+        $reservation = Reservation::with('customer')->findByPaymentId($request->orderid)->first();
 
         if (! $reservation) {
             Log::info('Reservation not found for id '.$request->orderid);
@@ -108,7 +108,7 @@ class EurobankPaymentGateway implements PaymentInterface
         if ($reservation->status === ReservationStatus::CONFIRMED || $newStatus === 'completed') {
             // Process successful payment
             ReservationConfirmed::dispatch($reservation);
-
+            
             return [
                 'status' => true,
                 'reservation' => $reservation ? $reservation->toArray() : [],
