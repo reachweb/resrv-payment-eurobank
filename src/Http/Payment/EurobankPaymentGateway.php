@@ -96,7 +96,7 @@ class EurobankPaymentGateway implements PaymentInterface
         }
 
         // If already confirmed, return
-        if ($reservation->status === ReservationStatus::CONFIRMED) {
+        if ($reservation->status === ReservationStatus::CONFIRMED->value) {
             return [
                 'status' => true,
                 'reservation' => $reservation ? $reservation->toArray() : [],
@@ -105,8 +105,9 @@ class EurobankPaymentGateway implements PaymentInterface
 
         $newStatus = $this->mapStatus($request->status);
 
-        if ($reservation->status === ReservationStatus::CONFIRMED || $newStatus === 'completed') {
+        if ($reservation->status === ReservationStatus::CONFIRMED->value || $newStatus === 'completed') {
             // Process successful payment
+            Log::info('Reservation confirmed', $reservation->toArray());
             ReservationConfirmed::dispatch($reservation);
             
             return [
@@ -115,6 +116,7 @@ class EurobankPaymentGateway implements PaymentInterface
             ];
         } else {
             // Handle failed payment
+            Log::info('Reservation cancelled', $reservation->toArray());
             ReservationCancelled::dispatch($reservation);
 
             return [
