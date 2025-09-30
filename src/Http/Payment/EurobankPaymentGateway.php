@@ -58,8 +58,6 @@ class EurobankPaymentGateway implements PaymentInterface
         return false;
     }
 
-    public function getPublicKey($reservation) {}
-
     public function supportsWebhooks(): bool
     {
         return false;
@@ -69,6 +67,14 @@ class EurobankPaymentGateway implements PaymentInterface
     {
         return false;
     }
+
+    public function getPublicKey($reservation) {
+        return '';
+    }
+
+    public function getSecretKey(Reservation $reservation) {}
+
+    public function getWebhookSecret(Reservation $reservation) {}
 
     public function handleRedirectBack(): array
     {
