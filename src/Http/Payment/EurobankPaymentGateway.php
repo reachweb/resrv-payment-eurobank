@@ -15,6 +15,26 @@ class EurobankPaymentGateway implements PaymentInterface
 {
     use HandlesStatamicQueries;
 
+    public function name(): string
+    {
+        return 'eurobank';
+    }
+
+    public function label(): string
+    {
+        return 'Credit / Debit Card';
+    }
+
+    public function paymentView(): string
+    {
+        return 'resrv-payment-eurobank::livewire.checkout-payment-eurobank';
+    }
+
+    public function supportsManualConfirmation(): bool
+    {
+        return false;
+    }
+
     public function paymentIntent($payment, Reservation $reservation, $data)
     {
         $orderId = date('YmdHis');
@@ -29,8 +49,11 @@ class EurobankPaymentGateway implements PaymentInterface
         return $paymentIntent;
     }
 
-    private function prepareBankData($payment, $reservation, $data, $orderId): array 
+    private function prepareBankData($payment, $reservation, $data, $orderId): array
     {
+        $callbackUrl = $this->getCheckoutCompleteEntry()->absoluteUrl();
+        $callbackUrl .= (str_contains($callbackUrl, '?') ? '&' : '?').'resrv_gateway='.$this->name();
+
         $bankData = [
             'mid' => env('EUROBANK_MID') ?? '',
             'lang' => 'en',
@@ -40,8 +63,8 @@ class EurobankPaymentGateway implements PaymentInterface
             'currency' => config('resrv-config.currency_isoCode'),
             'payerEmail' => $data->get('email'),
             'trType' => '2',
-            'confirmUrl' => $this->getCheckoutCompleteEntry()->absoluteUrl(),
-            'cancelUrl' => $this->getCheckoutCompleteEntry()->absoluteUrl(),
+            'confirmUrl' => $callbackUrl,
+            'cancelUrl' => $callbackUrl,
             'var1' => $reservation->entry()->title,
         ];
 
@@ -68,7 +91,8 @@ class EurobankPaymentGateway implements PaymentInterface
         return false;
     }
 
-    public function getPublicKey($reservation) {
+    public function getPublicKey(Reservation $reservation)
+    {
         return '';
     }
 
@@ -78,6 +102,10 @@ class EurobankPaymentGateway implements PaymentInterface
 
     public function handleRedirectBack(): array
     {
+        if ($pending = $this->handlePaymentPending()) {
+            return $pending;
+        }
+
         $request = request();
         Log::info('Payment callback received', $request->all());
 
@@ -166,7 +194,8 @@ class EurobankPaymentGateway implements PaymentInterface
     private function getBankData($request)
     {
         $allData = $request->all();
-        unset($allData['digest']);
+        unset($allData['digest'], $allData['resrv_gateway']);
+
         return $allData;
     }
 

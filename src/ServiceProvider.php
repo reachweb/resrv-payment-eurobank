@@ -10,10 +10,10 @@ class ServiceProvider extends AddonServiceProvider
     {
         parent::boot();
 
-        $this->loadViewsFrom(__DIR__.'/../resources/views', 'statamic-resrv');
+        $this->loadViewsFrom(__DIR__.'/../resources/views', 'resrv-payment-eurobank');
 
         $this->publishes([
-            __DIR__.'/../resources/views/livewire' => resource_path('views/vendor/statamic-resrv/livewire'),
+            __DIR__.'/../resources/views/livewire' => resource_path('views/vendor/resrv-payment-eurobank/livewire'),
         ], 'resrv-checkout-views-eurobank');
     }
 }
