@@ -2,8 +2,6 @@
 
 namespace Reach\ResrvPaymentEurobank\Http\Payment;
 
-use Reach\StatamicResrv\Models\Reservation;
-
 class EurobankIrisPaymentGateway extends EurobankPaymentGateway
 {
     public function name(): string

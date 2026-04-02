@@ -78,8 +78,9 @@ class EurobankPaymentGateway implements PaymentInterface
             'var1' => $reservation->entry()->title,
         ];
 
-        if ($this->payMethod()) {
-            $bankData['payMethod'] = $this->payMethod();
+        $payMethod = $this->payMethod();
+        if ($payMethod !== null) {
+            $bankData['payMethod'] = $payMethod;
         }
 
         $digestData = implode('', $bankData) . env('EUROBANK_SECRET');
