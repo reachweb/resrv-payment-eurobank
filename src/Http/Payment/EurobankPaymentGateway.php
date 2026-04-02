@@ -73,15 +73,18 @@ class EurobankPaymentGateway implements PaymentInterface
             'currency' => config('resrv-config.currency_isoCode'),
             'payerEmail' => $data->get('email'),
             'trType' => $this->trType(),
-            'confirmUrl' => $callbackUrl,
-            'cancelUrl' => $callbackUrl,
-            'var1' => $reservation->entry()->title,
         ];
 
         $payMethod = $this->payMethod();
         if ($payMethod !== null) {
             $bankData['payMethod'] = $payMethod;
         }
+
+        $bankData += [
+            'confirmUrl' => $callbackUrl,
+            'cancelUrl' => $callbackUrl,
+            'var1' => $reservation->entry()->title,
+        ];
 
         $digestData = implode('', $bankData) . env('EUROBANK_SECRET');
         $digest = base64_encode(sha1($digestData, true));
