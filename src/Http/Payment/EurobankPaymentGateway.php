@@ -49,6 +49,16 @@ class EurobankPaymentGateway implements PaymentInterface
         return $paymentIntent;
     }
 
+    protected function trType(): string
+    {
+        return '2';
+    }
+
+    protected function payMethod(): ?string
+    {
+        return null;
+    }
+
     private function prepareBankData($payment, $reservation, $data, $orderId): array
     {
         $callbackUrl = $this->getCheckoutCompleteEntry()->absoluteUrl();
@@ -62,15 +72,19 @@ class EurobankPaymentGateway implements PaymentInterface
             'orderAmount' => $payment->format(),
             'currency' => config('resrv-config.currency_isoCode'),
             'payerEmail' => $data->get('email'),
-            'trType' => '2',
+            'trType' => $this->trType(),
             'confirmUrl' => $callbackUrl,
             'cancelUrl' => $callbackUrl,
             'var1' => $reservation->entry()->title,
         ];
 
+        if ($this->payMethod()) {
+            $bankData['payMethod'] = $this->payMethod();
+        }
+
         $digestData = implode('', $bankData) . env('EUROBANK_SECRET');
         $digest = base64_encode(sha1($digestData, true));
-        
+
         return array_merge($bankData, ['digest' => $digest]);
     }
 
