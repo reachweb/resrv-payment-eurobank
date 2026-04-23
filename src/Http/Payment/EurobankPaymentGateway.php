@@ -85,6 +85,15 @@ class EurobankPaymentGateway implements PaymentInterface
         return array_merge($bankData, ['digest' => $digest]);
     }
 
+    public function cancelPaymentIntent(string $paymentId, Reservation $reservation): void
+    {
+        Log::info('Eurobank cancelPaymentIntent called (no-op)', [
+            'payment_id' => $paymentId,
+            'reservation_id' => $reservation->id,
+            'gateway' => $this->name(),
+        ]);
+    }
+
     public function refund($reservation)
     {
         throw new RefundFailedException('Refund not supported by Eurobank API.');
