@@ -29,11 +29,12 @@
         }
     },
     "require": {
-        "statamic/cms": "^5.0",
-        "reachweb/statamic-resrv": "^3.0 || dev-main"
+        "php": "^8.4",
+        "statamic/cms": "^6.0",
+        "reachweb/statamic-resrv": "^6.5"
     },
     "require-dev": {
-        "orchestra/testbench": "^9.0"
+        "orchestra/testbench": "^10.0 || ^11.0"
     },
     "config": {
         "allow-plugins": {
