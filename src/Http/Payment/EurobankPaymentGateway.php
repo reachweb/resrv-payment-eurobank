@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Reach\StatamicResrv\Enums\ReservationStatus;
 use Reach\StatamicResrv\Events\ReservationConfirmed;
+use Reach\StatamicResrv\Exceptions\CheckoutEntryNotFound;
 use Reach\StatamicResrv\Facades\Price;
 use Reach\StatamicResrv\Http\Payment\PaymentGatewayManager;
 use Reach\StatamicResrv\Http\Payment\PaymentInterface;
@@ -34,10 +35,14 @@ class EurobankPaymentGateway implements PaymentInterface
 
     protected const SUCCESS_STATUSES = ['AUTHORIZED', 'CAPTURED'];
 
-    protected const FAILURE_STATUSES = ['CANCELED', 'REFUSED', 'ERROR'];
-
-    /** How long an order's return URL and verified bank status are kept for retrievePaymentIntent(). */
+    /**
+     * How long an order's return URL and verified bank status are kept. They live only in the
+     * Laravel cache, so clearing it forgets them (see retrievePaymentIntent()).
+     */
     protected const ORDER_CACHE_DAYS = 90;
+
+    /** How long the return link may show the reservation's details on the checkout-complete page. */
+    protected const DETAILS_LINK_MINUTES = 60;
 
     public function name(): string
     {
@@ -86,9 +91,10 @@ class EurobankPaymentGateway implements PaymentInterface
         $orderId = 'R'.$reservation->id.'T'.now()->format('YmdHis').Str::random(8);
 
         // Where verifyPayment() sends the customer after the bank answers. Normal checkout passes
-        // the checkout-complete entry, the pay-by-link page its own authenticated URL.
+        // the checkout-complete entry, the pay-by-link page its own authenticated URL; null falls
+        // back to the checkout-complete entry when the customer returns.
         Cache::put($this->orderCacheKey($orderId), [
-            'return_url' => $returnUrl ?? $this->getCheckoutCompleteEntry()->absoluteUrl(),
+            'return_url' => $returnUrl,
             'status' => null,
         ], now()->addDays(static::ORDER_CACHE_DAYS));
 
@@ -143,14 +149,15 @@ class EurobankPaymentGateway implements PaymentInterface
      * instead of re-posting one the bank rejects as a duplicate. If the customer still completes
      * that older order in another tab, its callback reaches verifyPayment() as a stale intent and
      * admins are notified to refund it.
+     *
+     * The recorded status lives only in the Laravel cache. Once the cache is cleared, an order the
+     * bank captured also reads 'canceled'.
      */
     public function retrievePaymentIntent(string $paymentId, Reservation $reservation): ?object
     {
-        $bankStatus = Cache::get($this->orderCacheKey($paymentId))['status'] ?? null;
-
         $intent = new \stdClass;
         $intent->id = $paymentId;
-        $intent->status = match ($bankStatus) {
+        $intent->status = match ($this->bankStatus($paymentId)) {
             'CAPTURED' => 'succeeded',
             // trType 2 is a pre-authorization: the amount is held until captured in the back office.
             'AUTHORIZED' => 'requires_capture',
@@ -200,18 +207,32 @@ class EurobankPaymentGateway implements PaymentInterface
         }
 
         $orderId = request()->query('orderid');
-        $reservation = is_string($orderId) ? Reservation::findByPaymentId($orderId)->first() : null;
 
-        if (! $reservation) {
+        if (! is_string($orderId) || $orderId === '') {
             return [
                 'status' => false,
                 'reservation' => [],
             ];
         }
 
+        $reservation = Reservation::findByPaymentId($orderId)->first();
+
+        if ($reservation && in_array($reservation->status, ReservationStatus::live(), true)) {
+            $status = true;
+        } elseif (in_array($this->bankStatus($orderId), static::SUCCESS_STATUSES, true)) {
+            // The bank took the money but it didn't confirm the reservation (an older order the
+            // customer had moved on from, or a different amount). Admins were notified, so don't
+            // tell the customer the payment failed and invite them to pay again.
+            $status = 'pending';
+        } else {
+            $status = false;
+        }
+
         return [
-            'status' => in_array($reservation->status, ReservationStatus::live(), true),
-            'reservation' => $reservation->toArray(),
+            'status' => $status,
+            // Only a fresh link from the bank's callback shows the reservation: the URL ends up in
+            // browser history, logs and analytics.
+            'reservation' => $reservation && $this->detailsLinkIsValid($orderId) ? $reservation->toArray() : [],
         ];
     }
 
@@ -245,7 +266,7 @@ class EurobankPaymentGateway implements PaymentInterface
                 abort(403);
             }
 
-            return $this->redirectCustomer($orderId);
+            return $this->redirectCustomer($orderId, showDetails: false);
         }
 
         $this->processCallback($orderId, (string) ($fields['status'] ?? ''), $fields);
@@ -254,7 +275,7 @@ class EurobankPaymentGateway implements PaymentInterface
             return response('OK', 200);
         }
 
-        return $this->redirectCustomer($orderId);
+        return $this->redirectCustomer($orderId, showDetails: true);
     }
 
     protected function processCallback(?string $orderId, string $bankStatus, array $fields): void
@@ -415,6 +436,11 @@ class EurobankPaymentGateway implements PaymentInterface
         return str_contains((string) $request->userAgent(), 'Modirum VPOS');
     }
 
+    protected function bankStatus(string $orderId): ?string
+    {
+        return Cache::get($this->orderCacheKey($orderId))['status'] ?? null;
+    }
+
     protected function recordBankStatus(string $orderId, string $bankStatus): void
     {
         $key = $this->orderCacheKey($orderId);
@@ -430,19 +456,55 @@ class EurobankPaymentGateway implements PaymentInterface
         Cache::put($key, $order, now()->addDays(static::ORDER_CACHE_DAYS));
     }
 
-    /** 303 so the browser follows the bank's POST with a GET to the return page. */
-    protected function redirectCustomer(?string $orderId)
+    /**
+     * 303 so the browser follows the bank's POST with a GET to the return page. $showDetails signs
+     * the link so handleRedirectBack() may show the reservation for a while; only a callback with a
+     * valid digest gets one.
+     */
+    protected function redirectCustomer(?string $orderId, bool $showDetails)
     {
         $order = $orderId ? Cache::get($this->orderCacheKey($orderId), []) : [];
-        $base = $order['return_url'] ?? $this->getCheckoutCompleteEntry()->absoluteUrl();
+        $base = $order['return_url'] ?? $this->checkoutCompleteUrl();
+
+        $query = [
+            'orderid' => $orderId,
+            'resrv_gateway' => $this->configKey(),
+        ];
+
+        if ($orderId && $showDetails) {
+            $expires = (string) now()->addMinutes(static::DETAILS_LINK_MINUTES)->getTimestamp();
+            $query['eurobank_expires'] = $expires;
+            $query['eurobank_signature'] = $this->detailsLinkSignature($orderId, $expires);
+        }
 
         // The pay-by-link base already carries ?ref=…&hash=….
         $separator = str_contains($base, '?') ? '&' : '?';
 
-        return redirect()->away($base.$separator.http_build_query(array_filter([
-            'orderid' => $orderId,
-            'resrv_gateway' => $this->configKey(),
-        ])), 303);
+        return redirect()->away($base.$separator.http_build_query(array_filter($query)), 303);
+    }
+
+    /** Falls back to the home page when no checkout-complete entry is configured (pay-by-link only sites). */
+    protected function checkoutCompleteUrl(): string
+    {
+        try {
+            return $this->getCheckoutCompleteEntry()->absoluteUrl();
+        } catch (CheckoutEntryNotFound|\TypeError) {
+            return url('/');
+        }
+    }
+
+    protected function detailsLinkIsValid(string $orderId): bool
+    {
+        $expires = request()->query('eurobank_expires');
+        $signature = request()->query('eurobank_signature');
+
+        return is_string($expires) && ctype_digit($expires) && (int) $expires >= now()->getTimestamp()
+            && is_string($signature) && hash_equals($this->detailsLinkSignature($orderId, $expires), $signature);
+    }
+
+    protected function detailsLinkSignature(string $orderId, string $expires): string
+    {
+        return hash_hmac('sha256', $orderId.'|'.$expires, (string) config('app.key'));
     }
 
     protected function orderCacheKey(string $orderId): string

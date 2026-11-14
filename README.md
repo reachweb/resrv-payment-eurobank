@@ -33,6 +33,8 @@ Register the gateways in `config/resrv-config.php`:
 
 The add-on sends Eurobank Resrv's webhook URL for the gateway, `https://yoursite.com/resrv/api/webhook/{config key}`, as the order's confirm and cancel URL. Eurobank posts the payment result there, and the add-on checks its digest, confirms the reservation and sends the customer on to the checkout-complete page, or to the payment page of a manual reservation. Resrv already excludes these routes from CSRF protection, so no CSRF exception is needed any more. You can remove the one earlier versions asked for.
 
+The add-on keeps each order's return URL and the bank's answer in the Laravel cache for 90 days. Resrv reads them when a manual reservation's payment is resumed, cancelled, marked as paid or refunded. Use a persistent cache store and avoid clearing it on deploy: once an order is forgotten, it reads as cancelled, and a customer returning from the bank lands on the checkout-complete page (or the home page) instead of their payment page.
+
 Ask Eurobank / Cardlink to enable **background confirmation**. It sends a copy of the result straight to the same URL, so a reservation is still confirmed when the customer's browser never makes it back from the bank.
 
 ### Refunds

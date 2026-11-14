@@ -2,6 +2,8 @@
 
 namespace Reach\ResrvPaymentEurobank\Tests\Feature;
 
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Mail;
 use PHPUnit\Framework\Attributes\Test;
@@ -9,6 +11,7 @@ use Reach\ResrvPaymentEurobank\Http\Payment\EurobankPaymentGateway;
 use Reach\ResrvPaymentEurobank\Tests\TestCase;
 use Reach\StatamicResrv\Events\ReservationConfirmed;
 use Reach\StatamicResrv\Facades\Price;
+use Reach\StatamicResrv\Mail\OrphanedPaymentNotification;
 use Reach\StatamicResrv\Models\Reservation;
 
 class EurobankPaymentGatewayTest extends TestCase
@@ -24,13 +27,20 @@ class EurobankPaymentGatewayTest extends TestCase
     }
 
     #[Test]
-    public function the_bank_posts_back_to_the_webhook_route_of_the_gateways_own_config_key(): void
+    public function the_signed_form_sends_the_bank_back_to_the_webhook_route_of_the_gateways_own_config_key(): void
     {
         [, $postData] = $this->startPayment(Reservation::factory()->create());
 
+        $this->assertSame('0101119349', $postData['mid']);
+        $this->assertSame('EUR', $postData['currency']);
+        $this->assertSame('50.00', $postData['orderAmount']);
         $this->assertSame('http://localhost/resrv/api/webhook/card', $postData['confirmUrl']);
         $this->assertSame('http://localhost/resrv/api/webhook/card', $postData['cancelUrl']);
-        $this->assertSame('50.00', $postData['orderAmount']);
+
+        // The Cardlink spec signs every field value in order, followed by the shared secret.
+        $digest = $postData['digest'];
+        unset($postData['digest']);
+        $this->assertSame(base64_encode(sha1(implode('', $postData).'Cardlink1', true)), $digest);
     }
 
     #[Test]
@@ -39,10 +49,12 @@ class EurobankPaymentGatewayTest extends TestCase
         $reservation = Reservation::factory()->create();
         [$orderId] = $this->startPayment($reservation);
 
-        $this->postCallback($orderId, 'CAPTURED')
-            ->assertStatus(303)
-            ->assertRedirect(self::PAY_PAGE.'&orderid='.$orderId.'&resrv_gateway=card');
+        $response = $this->postCallback($orderId, 'CAPTURED')->assertStatus(303);
 
+        $this->assertStringStartsWith(
+            self::PAY_PAGE.'&orderid='.$orderId.'&resrv_gateway=card&eurobank_expires=',
+            $response->headers->get('Location'),
+        );
         $this->assertSame('confirmed', $reservation->fresh()->status);
         Event::assertDispatched(ReservationConfirmed::class, fn ($event) => $event->via === ReservationConfirmed::VIA_WEBHOOK
             && $event->payment === ['gateway' => 'card', 'payment_id' => $orderId]);
@@ -123,6 +135,7 @@ class EurobankPaymentGatewayTest extends TestCase
 
         $this->assertSame('pending', $reservation->fresh()->status);
         Event::assertNotDispatched(ReservationConfirmed::class);
+        Mail::assertSent(OrphanedPaymentNotification::class);
     }
 
     #[Test]
@@ -135,6 +148,59 @@ class EurobankPaymentGatewayTest extends TestCase
 
         $this->assertSame('pending', $reservation->fresh()->status);
         Event::assertNotDispatched(ReservationConfirmed::class);
+        Mail::assertSent(OrphanedPaymentNotification::class);
+    }
+
+    #[Test]
+    public function a_late_payment_for_an_expired_reservation_notifies_admins_instead_of_confirming(): void
+    {
+        $reservation = Reservation::factory()->create();
+        [$orderId] = $this->startPayment($reservation);
+        $reservation->update(['status' => 'expired']);
+
+        $this->postCallback($orderId, 'CAPTURED');
+
+        $this->assertSame('expired', $reservation->fresh()->status);
+        Event::assertNotDispatched(ReservationConfirmed::class);
+        Mail::assertSent(OrphanedPaymentNotification::class);
+    }
+
+    #[Test]
+    public function a_reservation_that_cannot_be_confirmed_is_not_reported_confirmed(): void
+    {
+        $reservation = Reservation::factory()->create();
+        [$orderId] = $this->startPayment($reservation);
+        $reservation->update(['status' => 'completed']);
+
+        $this->postCallback($orderId, 'CAPTURED');
+
+        $this->assertSame('completed', $reservation->fresh()->status);
+        Event::assertNotDispatched(ReservationConfirmed::class);
+    }
+
+    #[Test]
+    public function callbacks_are_rejected_while_no_secret_is_configured(): void
+    {
+        config(['resrv-payment-eurobank.secret' => '']);
+        $reservation = Reservation::factory()->create();
+        [$orderId] = $this->startPayment($reservation);
+
+        $this->postCallback($orderId, 'CAPTURED', secret: '');
+
+        $this->assertSame('pending', $reservation->fresh()->status);
+    }
+
+    #[Test]
+    public function a_customer_returns_to_the_home_page_when_the_order_was_forgotten_and_there_is_no_checkout_complete_entry(): void
+    {
+        $reservation = Reservation::factory()->create();
+        [$orderId] = $this->startPayment($reservation);
+        Cache::flush();
+
+        $response = $this->postCallback($orderId, 'CAPTURED')->assertStatus(303);
+
+        $this->assertStringStartsWith('http://localhost?orderid='.$orderId.'&resrv_gateway=card&', $response->headers->get('Location'));
+        $this->assertSame('confirmed', $reservation->fresh()->status);
     }
 
     #[Test]
@@ -150,6 +216,10 @@ class EurobankPaymentGatewayTest extends TestCase
         $this->postCallback($refused, 'REFUSED');
         $this->assertSame('canceled', $gateway->retrievePaymentIntent($refused, $reservation)->status);
 
+        [$captured] = $this->startPayment($reservation);
+        $this->postCallback($captured, 'CAPTURED');
+        $this->assertSame('succeeded', $gateway->retrievePaymentIntent($captured, $reservation)->status);
+
         [$authorized] = $this->startPayment($reservation);
         $this->postCallback($authorized, 'AUTHORIZED');
         $this->assertSame('requires_capture', $gateway->retrievePaymentIntent($authorized, $reservation)->status);
@@ -160,17 +230,43 @@ class EurobankPaymentGatewayTest extends TestCase
     }
 
     #[Test]
-    public function the_checkout_complete_page_reports_the_reservation_status(): void
+    public function the_checkout_complete_page_shows_the_reservation_only_through_a_fresh_link(): void
     {
         $reservation = Reservation::factory()->create();
         [$orderId] = $this->startPayment($reservation);
-        $this->postCallback($orderId, 'CAPTURED');
+        $returnLink = $this->postCallback($orderId, 'CAPTURED')->headers->get('Location');
 
-        $this->get('/?orderid='.$orderId);
-        $this->assertTrue($this->gateway()->handleRedirectBack()['status']);
+        $result = $this->returnTo($returnLink);
+        $this->assertTrue($result['status']);
+        $this->assertSame($reservation->id, $result['reservation']['id']);
 
-        $this->get('/?orderid=R999T20260101000000abcdefgh');
-        $this->assertFalse($this->gateway()->handleRedirectBack()['status']);
+        // The bare order id, or the link once it has expired, still reports the result but not the reservation.
+        $this->assertSame(['status' => true, 'reservation' => []], $this->returnTo('/?orderid='.$orderId));
+
+        $this->travel(61)->minutes();
+        $this->assertSame(['status' => true, 'reservation' => []], $this->returnTo($returnLink));
+    }
+
+    #[Test]
+    public function the_checkout_complete_page_reports_refused_and_unconfirmed_payments(): void
+    {
+        $refused = Reservation::factory()->create();
+        [$refusedOrder] = $this->startPayment($refused);
+        $this->assertFalse($this->returnTo($this->postCallback($refusedOrder, 'REFUSED')->headers->get('Location'))['status']);
+
+        // The bank took the money but it didn't confirm the reservation: not reported as failed.
+        $mismatched = Reservation::factory()->create();
+        [$mismatchedOrder] = $this->startPayment($mismatched);
+        $this->assertSame('pending', $this->returnTo($this->postCallback($mismatchedOrder, 'CAPTURED', amount: '40.00')->headers->get('Location'))['status']);
+
+        $this->assertFalse($this->returnTo('/?orderid=R999T20260101000000abcdefgh')['status']);
+    }
+
+    private function returnTo(string $url): array
+    {
+        $this->app->instance('request', Request::create($url));
+
+        return $this->gateway()->handleRedirectBack();
     }
 
     private function gateway(): EurobankPaymentGateway
@@ -194,7 +290,7 @@ class EurobankPaymentGatewayTest extends TestCase
     }
 
     /** Posts a callback signed as the Cardlink redirect specification describes. */
-    private function postCallback(string $orderId, string $status, string $amount = '50.00', string $userAgent = 'Mozilla/5.0', bool $tamper = false)
+    private function postCallback(string $orderId, string $status, string $amount = '50.00', string $userAgent = 'Mozilla/5.0', bool $tamper = false, string $secret = 'Cardlink1')
     {
         $fields = [
             'mid' => '0101119349',
@@ -209,7 +305,7 @@ class EurobankPaymentGatewayTest extends TestCase
             'riskScore' => '',
             'txId' => '926012471',
         ];
-        $fields['digest'] = base64_encode(sha1(implode('', $fields).'Cardlink1', true));
+        $fields['digest'] = base64_encode(sha1(implode('', $fields).$secret, true));
 
         if ($tamper) {
             $fields['orderAmount'] = '0.01';

@@ -45,6 +45,7 @@ abstract class TestCase extends AddonTestCase
         $app['config']->set('database.default', 'testing');
         $app['config']->set('cache.default', 'array');
         $app['config']->set('resrv-config.currency_isoCode', 'EUR');
+        $app['config']->set('resrv-config.admin_email', 'admin@example.com');
 
         // The card gateway is registered second so the config-key lookup can't match the IRIS
         // subclass by instanceof.
