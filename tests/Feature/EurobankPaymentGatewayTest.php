@@ -37,10 +37,62 @@ class EurobankPaymentGatewayTest extends TestCase
         $this->assertSame('http://localhost/resrv/api/webhook/card', $postData['confirmUrl']);
         $this->assertSame('http://localhost/resrv/api/webhook/card', $postData['cancelUrl']);
 
-        // The Cardlink spec signs every field value in order, followed by the shared secret.
+        // Version 2 of the Cardlink redirect spec: `version` is the first field, and the digest is
+        // the SHA-256 of every field value in order, followed by the shared secret.
+        $this->assertSame('version', array_key_first($postData));
+        $this->assertSame('2', $postData['version']);
+
         $digest = $postData['digest'];
         unset($postData['digest']);
-        $this->assertSame(base64_encode(sha1(implode('', $postData).'Cardlink1', true)), $digest);
+        $this->assertSame(base64_encode(hash('sha256', implode('', $postData).'Cardlink1', true)), $digest);
+    }
+
+    #[Test]
+    public function the_response_example_from_the_cardlink_specification_is_accepted(): void
+    {
+        // "Digest calculation in response message" on developer.cardlink.gr, for merchant
+        // 0101119349 with the shared secret Cardlink1: the digest below is the one Cardlink
+        // publishes, not one computed here.
+        $fields = [
+            'version' => '2',
+            'mid' => '0101119349',
+            'orderid' => 'O170911143656',
+            'status' => 'CAPTURED',
+            'orderAmount' => '0.12',
+            'currency' => 'EUR',
+            'paymentTotal' => '0.12',
+            'message' => 'OK, 00 - Approved',
+            'riskScore' => '0',
+            'payMethod' => 'visa',
+            'txId' => '926012471',
+            'paymentRef' => '138104',
+            'digest' => 'FpwgGyCRwhmF6CWtRFLqfkuQpdPyX8Xh3tJg3E891SA=',
+        ];
+
+        $this->postFields($fields, 'Modirum VPOS')->assertOk();
+
+        $this->assertSame('succeeded', $this->gateway()->retrievePaymentIntent('O170911143656', Reservation::factory()->create())->status);
+    }
+
+    #[Test]
+    public function a_callback_signed_the_pre_version_2_way_is_rejected(): void
+    {
+        $reservation = Reservation::factory()->create();
+        [$orderId] = $this->startPayment($reservation);
+
+        $fields = [
+            'mid' => '0101119349',
+            'orderid' => $orderId,
+            'status' => 'CAPTURED',
+            'orderAmount' => '50.00',
+            'currency' => 'EUR',
+            'paymentTotal' => '50.00',
+        ];
+        $fields['digest'] = base64_encode(sha1(implode('', $fields).'Cardlink1', true));
+
+        $this->postFields($fields, 'Modirum VPOS')->assertForbidden();
+
+        $this->assertSame('pending', $reservation->fresh()->status);
     }
 
     #[Test]
@@ -293,6 +345,7 @@ class EurobankPaymentGatewayTest extends TestCase
     private function postCallback(string $orderId, string $status, string $amount = '50.00', string $userAgent = 'Mozilla/5.0', bool $tamper = false, string $secret = 'Cardlink1')
     {
         $fields = [
+            'version' => '2',
             'mid' => '0101119349',
             'orderid' => $orderId,
             'status' => $status,
@@ -305,12 +358,17 @@ class EurobankPaymentGatewayTest extends TestCase
             'riskScore' => '',
             'txId' => '926012471',
         ];
-        $fields['digest'] = base64_encode(sha1(implode('', $fields).$secret, true));
+        $fields['digest'] = base64_encode(hash('sha256', implode('', $fields).$secret, true));
 
         if ($tamper) {
             $fields['orderAmount'] = '0.01';
         }
 
+        return $this->postFields($fields, $userAgent);
+    }
+
+    private function postFields(array $fields, string $userAgent)
+    {
         return $this->call(
             'POST',
             '/resrv/api/webhook/card',

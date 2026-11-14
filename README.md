@@ -41,6 +41,15 @@ Ask Eurobank / Cardlink to enable **background confirmation**. It sends a copy o
 
 Refunds are made in the Eurobank back office. Refunding a Eurobank reservation in the Resrv control panel marks it refunded and reminds you to return the money yourself, and customers cannot cancel these reservations online for an automatic refund.
 
-### Upgrading from the Resrv 3 version
+### Cardlink protocol version
 
-Payments started before the upgrade still post back to the checkout-complete page and will not confirm their reservation, so deploy when no payment is in progress.
+The add-on speaks version 2 of the Cardlink redirect specification: every request carries `version=2`, and requests and the bank's answers are signed with SHA-256. Releases up to v1.0.0 used the older format without a version field, signed with SHA-1.
+
+### Upgrading
+
+Deploy when no payment is in progress. The bank's answer to a payment that was started before the upgrade no longer confirms the reservation:
+
+- From v1.0.0: the add-on rejects an answer signed with SHA-1.
+- From the Resrv 3 version: the bank posts back to the checkout-complete page instead of Resrv's webhook URL.
+
+After upgrading, make one test payment per gateway (card and IRIS) to confirm that your merchant account accepts version 2.

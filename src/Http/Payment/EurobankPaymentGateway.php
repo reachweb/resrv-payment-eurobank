@@ -33,6 +33,9 @@ class EurobankPaymentGateway implements PaymentInterface
 {
     use HandlesStatamicQueries;
 
+    /** Version of the Cardlink redirect specification: it selects SHA-256 digests on both legs. */
+    protected const PROTOCOL_VERSION = '2';
+
     protected const SUCCESS_STATUSES = ['AUTHORIZED', 'CAPTURED'];
 
     /**
@@ -123,7 +126,9 @@ class EurobankPaymentGateway implements PaymentInterface
         $callbackUrl = route('resrv.webhook.gateway.store', ['gateway' => $this->configKey()]);
         $title = (string) data_get($reservation->entry(), 'title', '');
 
+        // In the order of the specification's field table: the digest signs the values in it.
         $bankData = [
+            'version' => static::PROTOCOL_VERSION,
             'mid' => config('resrv-payment-eurobank.mid') ?? '',
             'lang' => 'en',
             'orderid' => $orderId,
@@ -412,10 +417,14 @@ class EurobankPaymentGateway implements PaymentInterface
         return hash_equals($this->digest($fields), $received);
     }
 
-    /** Field values concatenated in order, then the shared secret: base64(sha1(...)). */
+    /**
+     * Field values concatenated in order, then the shared secret: base64(sha256(...)). The bank
+     * signs its answer to a version 2 request the same way, so an answer to an order posted in the
+     * older SHA-1 format no longer verifies.
+     */
     protected function digest(array $fields): string
     {
-        return base64_encode(sha1(implode('', $fields).config('resrv-payment-eurobank.secret'), true));
+        return base64_encode(hash('sha256', implode('', $fields).config('resrv-payment-eurobank.secret'), true));
     }
 
     protected function amountMatches(Reservation $reservation, array $fields): bool
